@@ -1,0 +1,148 @@
+========================================================================
+ИНСТРУКЦИЯ: Klipper + Octopus v1.1 F446 + EBB 42 v1.2 STM32G0B1 по CAN
+========================================================================
+
+СХЕМА ПОДКЛЮЧЕНИЯ
+-----------------
+Raspberry Pi
+  |-- USB --> Octopus v1.1 F446  (gs_usb CAN bridge, создаёт can0 на Pi)
+                  |
+                 CAN (CANH/CANL, отдельный разъём на Octopus)
+                  |
+              EBB 42 v1.2 (STM32G0B1, питание 24V от принтера)
+
+- CAN скорость: 1 000 000 bps
+- Терминирующие резисторы 120 Ом: на Octopus и на EBB 42 (джамперы)
+- EBB 42 питается от 24V через CAN-разъём (VBUS), НЕ от USB
+- USB к EBB 42 нужен ТОЛЬКО для прошивки через DFU
+
+
+КОНФИГУРАЦИЯ printer.cfg
+-------------------------
+[mcu]
+canbus_uuid: dde4eba60f0f       # Octopus — UUID фиксирован, от чипа
+
+[mcu EBBCan]
+canbus_uuid: 6269b37ddaba       # EBB 42 — UUID фиксирован, от чипа
+
+Примечание: UUID определяется уникальным ID чипа STM32 и не меняется
+при перепрошивке. Узнать UUID: python3 ~/klipper/lib/canboot/flash_can.py -i can0 -q
+(но этот скрипт видит только CanBoot-узлы; для Klipper-узлов UUID
+виден в логе klippy.log при успешном подключении)
+
+
+КАК УСТРОЕН CAN НА Raspberry Pi
+---------------------------------
+Файл: /etc/network/interfaces.d/can0
+  allow-hotplug can0
+  iface can0 can static
+      bitrate 1000000
+      up ip link set $IFACE txqueuelen 1024
+
+Octopus прошит как USB-CAN bridge (gs_usb драйвер, ID 1d50:606f).
+При подключении к Pi создаётся интерфейс can0 автоматически.
+Octopus одновременно является и CAN-адаптером для Pi, и MCU Klipper.
+
+
+ПРОШИВКА EBB 42 v1.2 (STM32G0B1)
+----------------------------------
+Параметры сборки (make menuconfig / .config):
+  - MCU: STM32G0B1
+  - Clock Reference: 8 MHz crystal
+  - Bootloader offset: No bootloader (0x8000000)
+  - Communication interface: CAN bus (on PB0/PB1)
+  - CAN bus speed: 1000000
+
+Соответствующие опции .config:
+  CONFIG_MACH_STM32=y
+  CONFIG_MACH_STM32G0B1=y
+  CONFIG_STM32_CLOCK_REF_8M=y
+  CONFIG_STM32_FLASH_START_0000=y      <- No bootloader
+  CONFIG_STM32_MMENU_CANBUS_PB0_PB1=y  <- CAN на PB0/PB1
+  CONFIG_CANBUS_FREQUENCY=1000000
+
+Сборка:
+  cd ~/klipper
+  make clean
+  # записать .config как выше
+  make olddefconfig
+  make -j4
+  # результат: out/klipper.bin (~43 KB)
+
+
+ПРОШИВКА ЧЕРЕЗ DFU (USB)
+-------------------------
+Нужно когда: EBB 42 не отвечает на CAN, прошивка слетела/некорректна.
+
+1. Подключить EBB 42 по USB к Raspberry Pi
+2. Войти в DFU режим:
+   - Зажать кнопку BOOT0 (держать)
+   - Нажать и отпустить RESET
+   - Отпустить BOOT0
+3. Проверить появление устройства:
+   lsusb | grep '0483:df11'
+   # Должно показать: STMicroelectronics STM Device in DFU Mode
+4. Прошить:
+   echo 'raspberry' | sudo -S dfu-util -a 0 \
+     -D ~/klipper/out/klipper.bin \
+     --dfuse-address 0x08000000:force:mass-erase:leave \
+     -d 0483:df11
+5. Сообщение "File downloaded successfully" = успех
+   "Error during download get_status" в конце = нормально (плата перезагрузилась)
+6. Отключить USB кабель от EBB 42
+
+
+ПРОВЕРОЧНЫЕ КОМАНДЫ
+-------------------
+
+# Статус CAN интерфейса (должен быть UP, bitrate 1000000)
+ip -details link show can0
+
+# Статус Klipper (должен быть active (running))
+sudo systemctl status klipper --no-pager
+
+# Лог Klipper (искать "Loaded MCU", "Configured MCU")
+tail -50 ~/printer_data/logs/klippy.log
+
+# Поиск CanBoot-узлов на шине (Klipper-узлы здесь НЕ видны)
+python3 ~/klipper/lib/canboot/flash_can.py -i can0 -q
+
+# Список USB устройств (Octopus должен быть 1d50:606f)
+lsusb
+
+
+ПРИЗНАКИ НОРМАЛЬНОЙ РАБОТЫ (в klippy.log)
+------------------------------------------
+Loaded MCU 'mcu' 151 commands        <- Octopus подключён
+Loaded MCU 'EBBCan' 138 commands     <- EBB 42 подключён
+Configured MCU 'mcu' (1024 moves)    <- Octopus настроен
+Configured MCU 'EBBCan' (1024 moves) <- EBB 42 настроен
+
+
+ПРИЗНАКИ ПРОБЛЕМ
+----------------
+mcu 'EBBCan': Serial connection closed   -> EBB не отвечает на CAN
+mcu 'EBBCan': Timeout on connect         -> то же самое
+mcu 'EBBCan': Unable to connect          -> итоговая ошибка подключения
+
+Причины и решения:
+  1. EBB 42 без питания (24V) -> проверить провода питания
+  2. Прошивка слетела -> перепрошить через DFU (USB)
+  3. Неверный UUID в printer.cfg -> посмотреть UUID в логе при успешном подключении
+  4. CAN скорость не совпадает -> пересобрать прошивку с нужной скоростью
+  5. Нет терминирующих резисторов -> проверить джамперы 120 Ом
+
+
+ПЕРЕПРОШИВКА В БУДУЩЕМ (без физического нажатия кнопок)
+---------------------------------------------------------
+Klipper поддерживает команду перезагрузки в DFU режим программно,
+если в прошивку вкомпилирована поддержка dfu_reboot (CONFIG_HAVE_BOOTLOADER_REQUEST).
+В текущей прошивке EBB 42 это включено (src/stm32/dfu_reboot.o компилируется).
+
+Через Klipper console (Mainsail/Fluidd):
+  CALL_REMOTE_METHOD method=reboot_machine   <- перезагрузка Pi (не DFU)
+
+Через klipper: пока EBB работает, можно отправить команду входа в DFU:
+  (зависит от конфигурации — уточнить при необходимости)
+
+Надёжный способ: физические кнопки BOOT0 + RESET (занимает 5 секунд).
