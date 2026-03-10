@@ -1,0 +1,308 @@
+========================================================================
+SESSION LOG — 2026-03-05
+Raspberry Pi: pi@192.168.2.20
+========================================================================
+
+------------------------------------------------------------------------
+[1] Проверка доступности Pi
+------------------------------------------------------------------------
+
+CMD: ssh -o StrictHostKeyChecking=no pi@192.168.2.20 'echo SSH OK'
+OUT: ssh: connect to host 192.168.2.20 port 22: No route to host
+     (Pi была недоступна, SSH-ключ ещё не добавлен)
+
+CMD: ping -c 3 192.168.2.20
+OUT: From 192.168.2.15 icmp_seq=1 Destination Host Unreachable
+     100% packet loss
+     (сеть недоступна — Pi выключена или другой адрес)
+
+     → Пользователь вручную выполнил: ssh-copy-id pi@192.168.2.20
+       (пароль: raspberry), после чего Pi стала доступна по ключу.
+
+CMD: ssh -o StrictHostKeyChecking=no pi@192.168.2.20 "echo 'SSH OK'"
+OUT: SSH OK
+
+------------------------------------------------------------------------
+[2] Первичная проверка состояния системы
+------------------------------------------------------------------------
+
+CMD: ssh pi@192.168.2.20 'ip -details link show can0'
+OUT: 3: can0: <NOARP,UP,LOWER_UP,ECHO> mtu 16 qdisc pfifo_fast state UP
+       can state ERROR-ACTIVE restart-ms 0
+       bitrate 1000000 sample-point 0.750
+       gs_usb: tseg1 1..16 tseg2 1..8 sjw 1..4 brp 1..1024
+       clock 48000000 parentbus usb parentdev 3-1:1.0
+     → CAN0 UP @ 1 Mbps, gs_usb (Octopus как CAN bridge) — OK
+
+CMD: ssh pi@192.168.2.20 'sudo systemctl status klipper --no-pager'
+OUT: sudo: a terminal is required to read the password
+     → не выполнено (sudo требует TTY через SSH)
+
+CMD: ssh pi@192.168.2.20 'grep -E "^(Start|Loaded MCU|Configured MCU|probe|error|Error)" ~/printer_data/logs/klippy.log | tail -30'
+OUT:
+  Start printer at Thu Mar  5 14:36:06 2026
+  Loaded MCU 'mcu' 151 commands (v0.13.0-541-g187481e25)
+  Loaded MCU 'EBBCan' 138 commands (v0.13.0-541-g187481e25)
+  Configured MCU 'mcu' (1024 moves)
+  Configured MCU 'EBBCan' (1024 moves)
+  Starting heater checks for heater_bed
+  Starting heater checks for extruder
+  Start printer at Thu Mar  5 14:36:56 2026
+  Loaded MCU 'mcu' 151 commands (v0.13.0-541-g187481e25)
+  Loaded MCU 'EBBCan' 138 commands (v0.13.0-541-g187481e25)
+  Configured MCU 'mcu' (1024 moves)
+  Configured MCU 'EBBCan' (1024 moves)
+  Starting heater checks for heater_bed
+  Starting heater checks for extruder
+  Start printer at Thu Mar  5 16:14:31 2026
+  ...
+  Start printer at Thu Mar  5 16:18:49 2026
+  Loaded MCU 'mcu' 151 commands
+  Loaded MCU 'EBBCan' 138 commands
+  Configured MCU 'mcu' (1024 moves)
+  Configured MCU 'EBBCan' (1024 moves)
+  Starting heater checks for heater_bed
+  Starting heater checks for extruder
+
+CMD: (stats из klippy.log, последняя строка)
+OUT: Stats 39.7: ...
+  heater_bed: target=0 temp=-57.1 pwm=0.000   ← ПРОБЛЕМА
+  extruder: target=0 temp=27.0 pwm=0.000       ← OK
+  raspberry_pi: temp=33.1                       ← OK
+  canstat_mcu: bus_state=active rx_error=0 tx_error=0 tx_retries=0
+  canstat_EBBCan: bus_state=active rx_error=0 tx_error=0 tx_retries=0
+
+------------------------------------------------------------------------
+[3] Чтение конфигов на Pi
+------------------------------------------------------------------------
+
+CMD: ssh pi@192.168.2.20 'cat ~/printer_data/config/printer.cfg'
+OUT: (совпадает с локальным configs/printer.cfg)
+
+CMD: ssh pi@192.168.2.20 'cat ~/printer_data/config/core.cfg'
+OUT:
+  [heater_bed]
+  heater_pin: PA1
+  sensor_pin: PF3
+  sensor_type: Generic 3950
+  control: watermark
+  min_temp: -100
+  max_temp: 130
+
+  [temperature_sensor raspberry_pi]
+  sensor_type: temperature_host
+  min_temp: -110
+  max_temp: 100
+
+------------------------------------------------------------------------
+[4] Диагностика термистора стола
+------------------------------------------------------------------------
+
+ВЫВОД: температура стола -57°C = ADC почти на максимуме.
+       Гипотеза: термистор не подключён (open circuit).
+
+       Пользователь сообщил: только что поставил термистор 100 kOhm в PF3.
+       Тип Generic 3950 уже верный (NTC 100K B3950).
+       Исправляем min_temp и перезапускаем.
+
+CMD: ssh pi@192.168.2.20 "sed -i 's/min_temp: -100/min_temp: 0/' ~/printer_data/config/core.cfg"
+OUT: (без вывода, успешно)
+
+CMD: ssh pi@192.168.2.20 'curl -s -X POST http://localhost:7125/printer/restart'
+OUT: {"result":"ok"}
+
+CMD: (через 8 сек) curl http://localhost:7125/printer/objects/query?heater_bed
+OUT: {"result":{"status":{"heater_bed":{"temperature":-55.46,"target":0.0,"power":0.0}}}}
+     → всё ещё -55°C, термистор по-прежнему не даёт контакта
+
+CMD: QUERY_ADC NAME=heater_bed  (через Moonraker gcode API)
+OUT: ADC object "heater_bed" has value 0.999237 (timestamp 56.080)
+     → 0.999 ≈ 3.3В на пине = open circuit (нет пути тока на GND)
+     → Норма для 100K NTC при 25°C ≈ 0.954
+
+     Параллельно: Klipper ушёл в shutdown:
+     "MCU 'mcu' shutdown: ADC out of range
+      Sensor 'heater_bed' temperature -53.646 not in range 0.000:130.000"
+
+------------------------------------------------------------------------
+[5] Восстановление из shutdown, откат min_temp
+------------------------------------------------------------------------
+
+CMD: ssh pi@192.168.2.20 "sed -i 's/min_temp: 0/min_temp: -100/' ~/printer_data/config/core.cfg"
+OUT: (без вывода, успешно)
+
+CMD: ssh pi@192.168.2.20 'curl -s -X POST http://localhost:7125/printer/firmware_restart'
+OUT: {"result":"ok"}
+
+CMD: (через 8 сек) curl http://localhost:7125/printer/objects/query?heater_bed
+OUT: {"result":{"status":{"heater_bed":{"temperature":-55.71,"target":0.0,"power":0.0}}}}
+     → всё ещё -55°C, ADC = open circuit
+
+     Вывод: физическое подключение термистора не даёт контакта.
+     Пользователь проверил разъём TB на Octopus и устранил плохой контакт.
+
+------------------------------------------------------------------------
+[6] После исправления физического подключения
+------------------------------------------------------------------------
+
+CMD: curl http://localhost:7125/printer/objects/query?heater_bed
+OUT: {"result":{"status":{"heater_bed":{"temperature":23.72,"target":0.0,"power":0.0}}}}
+     → 23.72°C — НОРМА (комнатная температура)
+
+CMD: ssh pi@192.168.2.20 "sed -i 's/min_temp: -100/min_temp: 0/' ~/printer_data/config/core.cfg && curl -s -X POST 'http://localhost:7125/printer/restart'"
+OUT: {"result":"ok"}
+
+CMD: (через 8 сек) curl http://localhost:7125/printer/objects/query?heater_bed
+OUT: {"result":{"status":{"heater_bed":{"temperature":23.72,"target":0.0,"power":0.0}}}}
+     → Klipper не упал в shutdown, min_temp=0 работает корректно
+
+------------------------------------------------------------------------
+[7] Синхронизация конфигов на локальный компьютер
+------------------------------------------------------------------------
+
+CMD: scp pi@192.168.2.20:~/printer_data/config/printer.cfg  configs/printer.cfg
+CMD: scp pi@192.168.2.20:~/printer_data/config/core.cfg     configs/core.cfg
+CMD: scp pi@192.168.2.20:~/printer_data/config/stepper.cfg  configs/stepper.cfg
+CMD: scp pi@192.168.2.20:~/printer_data/config/ebb_can.cfg  configs/ebb_can.cfg
+CMD: scp pi@192.168.2.20:~/printer_data/config/moonraker.conf configs/moonraker.conf
+OUT: Done
+
+------------------------------------------------------------------------
+[8] Финальная проверка (16:51)
+------------------------------------------------------------------------
+
+CMD: ssh pi@192.168.2.20 'grep -E "^(Start|Loaded MCU|Configured MCU|Starting heater)" ~/printer_data/logs/klippy.log | tail -10'
+OUT:
+  Start printer at Thu Mar  5 16:51:29 2026
+  Loaded MCU 'mcu' 151 commands (v0.13.0-541-g187481e25)    ← OK
+  Loaded MCU 'EBBCan' 138 commands (v0.13.0-541-g187481e25) ← OK
+  Configured MCU 'mcu' (1024 moves)
+  Configured MCU 'EBBCan' (1024 moves)
+  Starting heater checks for heater_bed
+  Starting heater checks for extruder
+
+CMD: ssh pi@192.168.2.20 'grep "^Stats" ~/printer_data/logs/klippy.log | tail -1'
+OUT: Stats 591.8: ...
+  heater_bed:   target=0 temp=23.8 pwm=0.000  ← НОРМА
+  extruder:     target=0 temp=27.3 pwm=0.000  ← НОРМА
+  raspberry_pi: temp=35.3°C                   ← НОРМА
+  canstat_mcu:    bus_state=active rx_error=0 tx_error=0 tx_retries=0
+  canstat_EBBCan: bus_state=active rx_error=0 tx_error=0 tx_retries=0
+
+========================================================================
+SESSION LOG — 2026-03-06
+========================================================================
+
+------------------------------------------------------------------------
+[9] Настройка нагрева стола через оптопару MOC3063 (220V AC)
+------------------------------------------------------------------------
+
+ИЗМЕНЕНИЯ в core.cfg:
+  heater_pin: PA1  →  PA8    (FAN0 → MOC3063 → триак → 220V)
+  добавлено: max_delta: 2.0
+  добавлено: pwm_cycle_time: 0.02  (50 Гц)
+
+CMD: scp configs/core.cfg pi@192.168.2.20:~/printer_data/config/core.cfg
+CMD: curl -X POST http://localhost:7125/printer/restart
+OUT: {"result":"ok"}
+
+CMD: curl http://localhost:7125/printer/objects/query?heater_bed
+OUT: temp=22.15 target=0.0 power=0.0  ← Klipper стартовал OK
+
+CMD: SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60
+OUT: {"result":"ok"}
+
+Мониторинг нагрева:
+  temp=25.5  power=1.0  ← нагреватель включился
+  temp=33.4  power=1.0
+  temp=35.4  power=1.0
+  temp=37.5  power=1.0
+  temp=39.3  power=1.0
+  temp=41.1  power=1.0
+  temp=57.1  power=1.0
+  temp=59.2  power=1.0
+  temp=61.3  power=1.0
+  temp=63.1  power=0.0  ← отключился (превысил target+max_delta)
+  temp=62.5  power=0.0
+  temp=61.5  power=0.0
+  temp=60.2  power=0.0
+  temp=59.1  power=0.0
+  temp=58.5  power=0.0  ← гистерезис: диапазон 58–63°C (watermark ±2°C)
+
+CMD: SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0
+OUT: {"result":"ok"}  ← нагрев выключен
+
+ИТОГ: нагрев стола 220V через MOC3063/PA8 работает штатно.
+      Скорость нагрева ~2°C/15 сек. Управление watermark max_delta=2.0.
+
+------------------------------------------------------------------------
+[10] Переключение на PID + калибровка стола
+------------------------------------------------------------------------
+
+ИЗМЕНЕНИЯ в core.cfg:
+  control: watermark  →  control: pid
+  max_delta убран, добавлены временные pid_Kp=10 / Ki=0.5 / Kd=50
+
+CMD: scp configs/core.cfg pi@192.168.2.20:~/printer_data/config/core.cfg
+CMD: curl -X POST http://localhost:7125/printer/restart
+OUT: {"result":"ok"}
+     temp=53.9 target=0.0 power=0.0  ← Klipper стартовал с PID
+
+Ожидание остывания стола до <40°C (от 53.7 до 39.9°C, ~20 мин):
+  53.7 → 50.0 → 47.5 → 45.0 → 42.5 → 40.0 → 39.9°C — готово
+
+CMD: PID_CALIBRATE HEATER=heater_bed TARGET=60
+OUT: {"result":"ok"} — калибровка запущена
+
+Процесс (Ziegler-Nichols, осцилляции между 55 и 60°C):
+  B:54.8 /60.0 power=1.00  ← нагрев
+  B:61.3 /55.0 power=0.00  ← охлаждение
+  B:55.1 /55.0 power=0.00
+  B:55.2 /60.0 power=1.00  ← нагрев
+  B:61.5 /55.0 power=0.00  ← охлаждение
+  ... (несколько циклов) ...
+  B:59.9 /60.0 power=1.00
+
+Результат калибровки:
+  // PID parameters: pid_Kp=57.369 pid_Ki=0.286 pid_Kd=2872.015
+
+CMD: SAVE_CONFIG
+OUT: ERROR — "section 'heater_bed' option 'control' conflicts with included value"
+     Причина: SAVE_CONFIG не может перезаписать параметры из included файлов (core.cfg)
+     Решение: перенести [heater_bed] из core.cfg → напрямую в printer.cfg
+
+------------------------------------------------------------------------
+[11] Перенос [heater_bed] в printer.cfg + запись PID значений
+------------------------------------------------------------------------
+
+Изменения:
+  core.cfg    — удалён раздел [heater_bed]
+  printer.cfg — добавлен [heater_bed] с откалиброванными PID значениями:
+    heater_pin: PA8
+    sensor_pin: PF3
+    sensor_type: Generic 3950
+    control: pid
+    pid_Kp: 57.369
+    pid_Ki: 0.286
+    pid_Kd: 2872.015
+    min_temp: 0
+    max_temp: 130
+    pwm_cycle_time: 0.02
+
+CMD: scp configs/printer.cfg pi@192.168.2.20:~/printer_data/config/printer.cfg
+CMD: scp configs/core.cfg    pi@192.168.2.20:~/printer_data/config/core.cfg
+CMD: curl -X POST http://localhost:7125/printer/restart
+OUT: {"result":"ok"}
+     temp=48.6 target=0.0 power=0.00  ← Klipper стартовал с PID OK
+
+Конфиги синхронизированы: Pi → configs/ (printer.cfg, core.cfg)
+
+========================================================================
+ИТОГ СЕССИИ (2026-03-06)
+  Настроен нагрев стола 220V через MOC3063 (PA8)
+  Проведена PID калибровка: Kp=57.369 Ki=0.286 Kd=2872.015
+  [heater_bed] перенесён в printer.cfg (совместимость с SAVE_CONFIG)
+  Статус: всё работает штатно
+========================================================================
+
+Ко
