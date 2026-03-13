@@ -35,8 +35,8 @@
 ### Датчики
 | Датчик | Пин | Статус |
 |--------|-----|--------|
-| X endstop | PG6 | работает, X=0 у левого концевика |
-| Y endstop | PG9 | работает, Y=350 у заднего концевика |
+| X sensorless | PG6 (DIAG) | StallGuard TMC5160, driver_SGT=2, физический концевик убран |
+| Y sensorless | PG9 (DIAG) | StallGuard TMC5160, driver_SGT=2, физический концевик убран |
 | Z endstop верхний | PG10 (^) | хоминг Z, position_endstop=15.8 |
 | Z endstop нижний | PG10 (^) | тот же пин, физический упор снизу |
 | Z probe | EBBCan:PB8 (^!) | настроен, датчик не установлен физически |
@@ -92,7 +92,8 @@ redfab-claude/
     ├── snapshot-2026-03-10b/  ← XY хоминг (X=0 слева, Y=350 сзади) ✓
     ├── snapshot-2026-03-10c/  ← homing_override с опусканием Z перед XY
     ├── snapshot-2026-03-11/   ← ПРИНТЕР ГОТОВ К ПЕЧАТИ ✓ (Z калибровка, shaper, LED)
-    └── snapshot-2026-03-12/   ← (текущий)
+    ├── snapshot-2026-03-12/
+    └── snapshot-2026-03-13/   ← sensorless homing X/Y (SGT=2) ✓ (текущий)
 ```
 
 ---
@@ -147,8 +148,8 @@ redfab-claude/
 - [x] Нагрев стола 220V, PID откалиброван (Kp=57.369 Ki=0.286 Kd=2872.015)
 - [x] ADXL345 работает
 - [x] Датчик филамента настроен
-- [x] Хоминг X: X=0 у левого концевика (PG6) ✓
-- [x] Хоминг Y: Y=350 у заднего концевика (PG9) ✓
+- [x] Хоминг X: X=0 sensorless StallGuard (PG6 DIAG, driver_SGT=2) ✓
+- [x] Хоминг Y: Y=350 sensorless StallGuard (PG9 DIAG, driver_SGT=2) ✓
 - [x] Хоминг Z: position_endstop=15.8, Z=0 проверен бумагой ✓
 - [x] homing_override: опустить Z на 20мм → G28 X → G28 Y → G1 X9 Y27 → G28 Z
 - [x] rotation_distance Z: 32 (откалибровано: 200мм → реально 160мм → коэф. 0.8)
@@ -188,8 +189,8 @@ SHAPER_CALIBRATE
 
 | Ось | Концевик | Пин | Позиция | dir_pin |
 |-----|----------|-----|---------|---------|
-| X | Левый | PG6 | X=0 | !PF12 |
-| Y | Задний | PG9 | Y=350 | !PG1 (homing_positive_dir: true) |
+| X | DIAG sensorless | PG6 | X=0, SGT=2 | !PF12 |
+| Y | DIAG sensorless | PG9 | Y=350, SGT=2 | !PG1 (homing_positive_dir: true) |
 | Z | Верхний | PG10 | Z=15.8 (концевик), Z=0 (сопло у стола) | !PG3 (homing_positive_dir: false) |
 
 - Z=0 = сопло у стола, Z+ = стол вниз
