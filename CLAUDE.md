@@ -22,7 +22,7 @@
 
 ### Кинематика
 - Тип: CoreXY
-- Рабочая зона: 300×350×350 мм
+- Рабочая зона: X=285, Y=440, Z=250 мм
 - Z: 4 независимых мотора (quad_gantry_level)
 - Редуктор Z: 80:20 (шестерня к ремню), rotation_distance=32 (откалибровано)
 
@@ -38,10 +38,11 @@
 | X sensorless | PG6 (DIAG) | StallGuard TMC5160, driver_SGT=2, физический концевик убран |
 | Y sensorless | PG9 (DIAG) | StallGuard TMC5160, driver_SGT=2, физический концевик убран |
 | Z endstop верхний | PG10 (^) | хоминг Z, position_endstop=15.8 |
-| Z endstop нижний | PG10 (^) | тот же пин, физический упор снизу |
+| Z endstop нижний | PG11 (^) | ограничитель опускания, filament_switch_sensor z_bottom |
 | Z probe | EBBCan:PB8 (^!) | настроен, датчик не установлен физически |
 | ADXL345 | EBBCan:PB12 (SPI2) | работает, для input shaper |
 | Датчик филамента | EBBCan:PB3 (^) | настроен |
+| Ёмкостный датчик | EBBCan:PA4 | аналоговый, отображается на графике (0–330) |
 | Термистор стола | PF3 | работает |
 | Термистор хотенда | EBBCan:PA3 | настроен |
 | Темп. Raspberry Pi | host | отображается |
@@ -93,7 +94,8 @@ redfab-claude/
     ├── snapshot-2026-03-10c/  ← homing_override с опусканием Z перед XY
     ├── snapshot-2026-03-11/   ← ПРИНТЕР ГОТОВ К ПЕЧАТИ ✓ (Z калибровка, shaper, LED)
     ├── snapshot-2026-03-12/
-    └── snapshot-2026-03-13/   ← sensorless homing X/Y (SGT=2) ✓ (текущий)
+    ├── snapshot-2026-03-13/   ← sensorless homing X/Y (SGT=2) ✓
+    └── snapshot-2026-03-16/   ← расширенный homing, нижний концевик Z PG11, ёмкостный датчик PA4 (текущий)
 ```
 
 ---
@@ -108,8 +110,10 @@ redfab-claude/
 | Stepper Z1 | PG4/PC1/PA0 | TMC5160, cs=PC7 |
 | Stepper Z2 | PF9/PF10/PG2 | TMC5160, cs=PF2 |
 | Stepper Z3 | PC13/PF0/PF1 | TMC5160, cs=PE4 |
-| X endstop | PG6 | |
-| Y endstop | PG9 | |
+| X endstop (DIAG sensorless) | PG6 | |
+| Y endstop (DIAG sensorless) | PG9 | |
+| Z endstop верхний (хоминг) | PG10 | |
+| Z endstop нижний (ограничитель) | PG11 | filament_switch_sensor z_bottom |
 | Нагрев стола | PA8 (FAN0) | 220V через MOC3063 |
 | Термистор стола | PF3 | Generic 3950, 100K |
 | Neopixel (лента) | PB0 | WS2812B, 30 LED, GRB |
@@ -148,14 +152,17 @@ redfab-claude/
 - [x] Нагрев стола 220V, PID откалиброван (Kp=57.369 Ki=0.286 Kd=2872.015)
 - [x] ADXL345 работает
 - [x] Датчик филамента настроен
-- [x] Хоминг X: X=0 sensorless StallGuard (PG6 DIAG, driver_SGT=2) ✓
-- [x] Хоминг Y: Y=350 sensorless StallGuard (PG9 DIAG, driver_SGT=2) ✓
-- [x] Хоминг Z: position_endstop=15.8, Z=0 проверен бумагой ✓
-- [x] homing_override: опустить Z на 20мм → G28 X → G28 Y → G1 X9 Y27 → G28 Z
-- [x] rotation_distance Z: 32 (откалибровано: 200мм → реально 160мм → коэф. 0.8)
+- [x] Хоминг X: sensorless StallGuard PG6, position_endstop=-35, отъезд к X=0 ✓
+- [x] Хоминг Y: sensorless StallGuard PG9, position_endstop=441, отъезд к Y=440 ✓
+- [x] Хоминг Z: верхний концевик PG10, position_endstop=15.8 ✓
+- [x] homing_override полный: G28 X → X=0 → G28 Y → Y=440 → G28 X (фиксация) → парковка X=285 Y=0 → нагрев 230°C → чистка сопла → _LOWER_Z_SAFE → X=-25 Y=114 → G28 Z → парковка X=285 Y=0 Z=5
+- [x] Нижний концевик Z: PG11, filament_switch_sensor z_bottom, ограничивает опускание стола ✓
+- [x] _LOWER_Z_SAFE: безопасное опускание по 0.2мм с проверкой нижнего концевика (макс 20мм) ✓
+- [x] Рабочая зона: X=285, Y=440, Z=250 мм
+- [x] rotation_distance Z: 32, экструдера: 5.44
 - [x] Input shaper: mzv X=71.0Hz Y=45.6Hz, max_accel=5000 mm/s² ✓
-- [x] rotation_distance экструдера: 5.44 (откалибровано ранее)
 - [x] Адресная лента WS2812B: 30 LED, PB0, GRB, оранжевый по умолчанию
+- [x] Ёмкостный датчик: EBBCan:PA4, аналоговый, шкала 0–330 (= напряжение × 100) ✓
 
 ### Нужно сделать
 - [ ] PID_CALIBRATE для экструдера (при рабочей температуре 200°C)
@@ -185,17 +192,19 @@ SHAPER_CALIBRATE
 
 ---
 
-## Координатная система (откалибровано 2026-03-10/11)
+## Координатная система (актуально 2026-03-16)
 
 | Ось | Концевик | Пин | Позиция | dir_pin |
 |-----|----------|-----|---------|---------|
-| X | DIAG sensorless | PG6 | X=0, SGT=2 | !PF12 |
-| Y | DIAG sensorless | PG9 | Y=350, SGT=2 | !PG1 (homing_positive_dir: true) |
-| Z | Верхний | PG10 | Z=15.8 (концевик), Z=0 (сопло у стола) | !PG3 (homing_positive_dir: false) |
+| X | DIAG sensorless | PG6 | position_endstop=-35, рабочий диапазон -35..285 | !PF12 |
+| Y | DIAG sensorless | PG9 | position_endstop=441, отъезд к Y=440 | !PG1 (homing_positive_dir: true) |
+| Z верхний | Физический NC | PG10 | position_endstop=15.8, Z=0 у стола | !PG3 (homing_positive_dir: false) |
+| Z нижний | Физический | PG11 | ограничитель (filament_switch_sensor z_bottom) | — |
 
 - Z=0 = сопло у стола, Z+ = стол вниз
-- Оба Z концевика (верхний и нижний) на одном пине PG10
-- Позиция под Z концевик: **X=9, Y=27** (9мм от левого, 27мм от переднего края)
+- Z верхний и нижний концевики теперь на **разных пинах**: PG10 (хоминг) и PG11 (ограничитель)
+- Позиция под Z концевик: **X=-25, Y=114**
+- После хоминга X: отъезд к X=0. После хоминга Y: отъезд к Y=440.
 
 ---
 
